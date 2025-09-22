@@ -700,7 +700,24 @@ public struct TranscriptionProgress: Sendable {
     }
 }
 
-// Callbacks to receive state updates during transcription.
+/// Represents discrete events emitted while performing a transcription.
+///
+/// - Note: Progress updates may be emitted multiple times, whereas the finished
+///   event is emitted exactly once with the final `TranscriptionResult` payload.
+public enum TranscriptionEvent {
+    /// A progress update containing the latest incremental transcription data.
+    case progress(TranscriptionProgress)
+
+    /// The final transcription result emitted when processing completes.
+    case finished(TranscriptionResult)
+}
+
+/// Preferred asynchronous stream-based API for observing transcription progress
+/// and completion events.
+public typealias TranscriptionEventStream = AsyncThrowingStream<TranscriptionEvent, Error>
+
+// Legacy callbacks to receive state updates during transcription. Prefer
+// `TranscriptionEventStream` for new integrations.
 
 /// A callback that provides transcription segments as they are discovered.
 /// - Parameters:
@@ -742,7 +759,7 @@ public enum TranscriptionState: CustomStringConvertible {
     }
 }
 
-/// Callback to receive progress updates during transcription.
+/// Legacy callback to receive progress updates during transcription.
 ///
 /// - Parameters:
 ///   - progress: The current transcription progress, including the transcribed text, tokens, and other relevant information.
@@ -751,7 +768,8 @@ public enum TranscriptionState: CustomStringConvertible {
 ///   - `true`: Continue the transcription process.
 ///   - `false`: Stop the transcription process early.
 ///   - `nil`: Continue the transcription process (equivalent to returning `true`).
-/// - Note: This callback should be lightweight and return as quickly as possible to avoid extra decoding loops
+/// - Note: This callback should be lightweight and return as quickly as possible to avoid extra decoding loops.
+@available(*, deprecated, message: "Use TranscriptionEventStream for progress updates instead.")
 public typealias TranscriptionCallback = ((TranscriptionProgress) -> Bool?)?
 
 public struct TranscriptionTimings: Codable, Sendable {
