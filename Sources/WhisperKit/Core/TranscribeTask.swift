@@ -15,6 +15,9 @@ final class TranscribeTask {
     private let textDecoder: any TextDecoding
     private let tokenizer: any WhisperTokenizer
     private let audioProcessor: any AudioProcessing
+    private let decoderProgressContinuationLock = NSLock()
+    private var activeDecoderProgressContinuation:
+        AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
 
     public var segmentDiscoveryCallback: SegmentDiscoveryCallback?
 
@@ -38,14 +41,87 @@ final class TranscribeTask {
         self.tokenizer = tokenizer
     }
 
+
     func run(
         audioArray: [Float],
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
-    ) async throws -> TranscriptionResult {
-        let interval = Logging.beginSignpost("TranscribeAudio", signposter: Logging.TranscribeTask.signposter)
-        defer { Logging.endSignpost("TranscribeAudio", interval: interval, signposter: Logging.TranscribeTask.signposter) }
+    ) async throws -> TranscriptionEventStream {
+        let stream = AsyncThrowingStream<TranscriptionEvent, Error> { continuation in
+            let task = Task {
+                let interval = Logging.beginSignpost("TranscribeAudio", signposter: Logging.TranscribeTask.signposter)
+                defer {
+                    Logging.endSignpost(
+                        "TranscribeAudio",
+                        interval: interval,
+                        signposter: Logging.TranscribeTask.signposter
+                    )
+                }
 
+                do {
+                    let result = try await self.performTranscription(
+                        audioArray: audioArray,
+                        decodeOptions: decodeOptions,
+                        callback: callback,
+                        eventContinuation: continuation
+                    )
+                    let yieldResult = continuation.yield(.finished(result))
+                    if case .terminated = yieldResult {
+                        self.finishActiveDecoderProgressContinuation()
+                    }
+                    continuation.finish()
+                } catch {
+                    self.finishActiveDecoderProgressContinuation(error: error)
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { [weak self] _ in
+                task.cancel()
+                self?.finishActiveDecoderProgressContinuation()
+            }
+        }
+
+        return stream
+    }
+
+    @available(*, deprecated, message: "Use the event-streaming overload of `run` instead.")
+    @_disfavoredOverload
+    func run(
+        audioArray: [Float],
+        decodeOptions: DecodingOptions? = nil,
+        callback: TranscriptionCallback = nil,
+        accumulatingResult _: Bool = true
+    ) async throws -> TranscriptionResult {
+        let stream: TranscriptionEventStream = try await run(
+            audioArray: audioArray,
+            decodeOptions: decodeOptions,
+            callback: callback
+        )
+
+        var finalResult: TranscriptionResult?
+        for try await event in stream {
+            switch event {
+                case .progress:
+                    continue
+                case .finished(let result):
+                    finalResult = result
+            }
+        }
+
+        guard let result = finalResult else {
+            throw WhisperError.transcriptionFailed("Missing final transcription result")
+        }
+
+        return result
+    }
+
+    private func performTranscription(
+        audioArray: [Float],
+        decodeOptions: DecodingOptions?,
+        callback: TranscriptionCallback,
+        eventContinuation: AsyncThrowingStream<TranscriptionEvent, Error>.Continuation
+    ) async throws -> TranscriptionResult {
         timings.pipelineStart = min(CFAbsoluteTimeGetCurrent(), timings.pipelineStart)
         Logging.debug("Starting pipeline at: \(Date())")
 
@@ -55,7 +131,8 @@ final class TranscribeTask {
         var detectedLanguage: String?
 
         let contentFrames = audioArray.count
-        timings.inputAudioSeconds = Double(contentFrames) / Double(WhisperKit.sampleRate) - Double(decodeOptions?.clipTimestamps.first ?? 0)
+        timings.inputAudioSeconds = Double(contentFrames) / Double(WhisperKit.sampleRate)
+            - Double(decodeOptions?.clipTimestamps.first ?? 0)
 
         // MARK: Init decoder inputs
 
@@ -65,7 +142,9 @@ final class TranscribeTask {
         var transcription = ""
 
         let startDecoderInit = CFAbsoluteTimeGetCurrent()
-        var decoderInputs = try textDecoder.prepareDecoderInputs(withPrompt: [tokenizer.specialTokens.startOfTranscriptToken])
+        var decoderInputs = try textDecoder.prepareDecoderInputs(
+            withPrompt: [tokenizer.specialTokens.startOfTranscriptToken]
+        )
         let decoderInitTime = CFAbsoluteTimeGetCurrent() - startDecoderInit
         timings.decodingInit = decoderInitTime
         Logging.debug("Decoder init time: \(decoderInitTime)")
@@ -105,7 +184,7 @@ final class TranscribeTask {
 
             // Prevent hallucinations at the end of the clip by stopping clip seek early
             let windowPadding = Int(options.windowClipTime * Float(WhisperKit.sampleRate))
-            
+
             let windowSamples = featureExtractor.windowSamples ?? Constants.defaultWindowSamples
             while seek < seekClipEnd - windowPadding {
                 // calculate new encoder segment features
@@ -117,7 +196,11 @@ final class TranscribeTask {
 
                 let audioProcessingStart = Date()
                 let clipAudioSamples = Array(audioArray[seek..<(seek + segmentSize)])
-                guard let audioSamples = audioProcessor.padOrTrim(fromArray: clipAudioSamples, startAt: 0, toLength: windowSamples) else {
+                guard let audioSamples = audioProcessor.padOrTrim(
+                    fromArray: clipAudioSamples,
+                    startAt: 0,
+                    toLength: windowSamples
+                ) else {
                     throw WhisperError.transcriptionFailed("Audio samples are nil")
                 }
                 let processTime = Date().timeIntervalSince(audioProcessingStart)
@@ -155,7 +238,12 @@ final class TranscribeTask {
 
                 try Task.checkCancellation()
                 // Send to decoder to predict text tokens with fallback
-                let decodingResult = try await decodeWithFallback(encoderSegment: encoderOutput, decodingOptions: options, callback: decodingCallback)
+                let decodingResult = try await decodeWithFallback(
+                    encoderSegment: encoderOutput,
+                    decodingOptions: options,
+                    callback: decodingCallback,
+                    eventContinuation: eventContinuation
+                )
 
                 // MARK: Windowing
 
@@ -211,12 +299,15 @@ final class TranscribeTask {
                         Logging.debug("Word timestamps:")
                         for segment in currentSegments ?? [] {
                             for word in segment.words ?? [] {
-                                Logging.debug("[\(word.start.formatted(.number.precision(.significantDigits(3)))) -> \(word.end.formatted(.number.precision(.significantDigits(3))))] prob: \(word.probability), word: \(word.word)")
+                                Logging.debug(
+                                    "[\(word.start.formatted(.number.precision(.significantDigits(3)))) -> \(word.end.formatted(.number.precision(.significantDigits(3))))] prob: \(word.probability), word: \(word.word)"
+                                )
                             }
                         }
                     }
+
                 }
-                
+
                 // Prevent seek from exceeding previousSeek + maxWindowSeek if provided
                 if let maxWindowSeek = options.maxWindowSeek {
                     let maxSeekOffset = previousSeek + maxWindowSeek
@@ -266,13 +357,16 @@ final class TranscribeTask {
         func decodeWithFallback(
             encoderSegment encoderOutput: any AudioEncoderOutputType,
             decodingOptions options: DecodingOptions,
-            callback: TranscriptionCallback = nil
+            callback: TranscriptionCallback = nil,
+            eventContinuation: AsyncThrowingStream<TranscriptionEvent, Error>.Continuation
         ) async throws -> DecodingResult {
             let interval = Logging.beginSignpost("Decode", signposter: Logging.TranscribeTask.signposter)
             defer { Logging.endSignpost("Decode", interval: interval, signposter: Logging.TranscribeTask.signposter) }
 
             // Fallback `options.temperatureFallbackCount` times with increasing temperatures, starting at `options.temperature`
-            let temperatures = (0...options.temperatureFallbackCount).map { FloatType(options.temperature) + FloatType($0) * FloatType(options.temperatureIncrementOnFallback) }
+            let temperatures = (0...options.temperatureFallbackCount).map {
+                FloatType(options.temperature) + FloatType($0) * FloatType(options.temperatureIncrementOnFallback)
+            }
 
             Logging.debug("Decoding with temperatures \(temperatures)")
 
@@ -282,7 +376,11 @@ final class TranscribeTask {
                 Logging.info("Decoding Temperature: \(temp)")
                 let decodeWithFallbackStart = Date()
 
-                let tokenSampler = GreedyTokenSampler(temperature: temp, eotToken: tokenizer.specialTokens.endToken, decodingOptions: options)
+                let tokenSampler = GreedyTokenSampler(
+                    temperature: temp,
+                    eotToken: tokenizer.specialTokens.endToken,
+                    decodingOptions: options
+                )
 
                 var currentDecodingOptions = options
                 // For a multilingual model, if language is not passed and detectLanguage is true, detect language and set in options
@@ -301,9 +399,14 @@ final class TranscribeTask {
 
                     // Update prompt and KV Cache if needed
                     if options.usePrefillPrompt {
-                        decoderInputs = try await textDecoder.prefillDecoderInputs(decoderInputs, withOptions: currentDecodingOptions)
+                        decoderInputs = try await textDecoder.prefillDecoderInputs(
+                            decoderInputs,
+                            withOptions: currentDecodingOptions
+                        )
                     }
-                    Logging.debug("Prefill prompt updated to: \(decoderInputs.initialPrompt.map { tokenizer.convertIdToToken($0) ?? "" })")
+                    Logging.debug(
+                        "Prefill prompt updated to: \(decoderInputs.initialPrompt.map { tokenizer.convertIdToToken($0) ?? "" })"
+                    )
 
                     // Update timings from the language detection
                     if let languageDecodingTimings = languageDecodingResult?.timings {
@@ -312,13 +415,61 @@ final class TranscribeTask {
                     }
                 }
 
-                decodingResult = try await textDecoder.decodeText(
-                    from: encoderOutput,
-                    using: decoderInputs,
-                    sampler: tokenSampler,
-                    options: currentDecodingOptions,
-                    callback: callback
-                )
+                var decoderProgressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
+                let decoderProgressStream = AsyncThrowingStream<TranscriptionProgress, Error> { continuation in
+                    decoderProgressContinuation = continuation
+                }
+
+                guard let decoderProgressContinuation else {
+                    fatalError("Unable to create decoder progress continuation")
+                }
+
+                storeActiveDecoderProgressContinuation(decoderProgressContinuation)
+
+                let decodingTask = Task {
+                    try await textDecoder.decodeText(
+                        from: encoderOutput,
+                        using: decoderInputs,
+                        sampler: tokenSampler,
+                        options: currentDecodingOptions,
+                        progressContinuation: decoderProgressContinuation
+                    )
+                }
+
+                do {
+                    for try await progress in decoderProgressStream {
+                        let yieldResult = eventContinuation.yield(.progress(progress))
+
+                        if case .terminated = yieldResult {
+                            storeActiveDecoderProgressContinuation(nil)
+                            finishDecoderProgressContinuation(decoderProgressContinuation)
+                            throw CancellationError()
+                        }
+
+                        if let callback,
+                           let shouldContinue = callback(progress),
+                           !shouldContinue {
+                            storeActiveDecoderProgressContinuation(nil)
+                            finishDecoderProgressContinuation(decoderProgressContinuation)
+                            break
+                        }
+                    }
+                } catch {
+                    storeActiveDecoderProgressContinuation(nil)
+                    finishDecoderProgressContinuation(decoderProgressContinuation, error: error)
+                    decodingTask.cancel()
+                    throw error
+                }
+
+                do {
+                    decodingResult = try await decodingTask.value
+                } catch {
+                    storeActiveDecoderProgressContinuation(nil)
+                    finishDecoderProgressContinuation(decoderProgressContinuation, error: error)
+                    throw error
+                }
+
+                storeActiveDecoderProgressContinuation(nil)
 
                 // Use the predicted language if it was not detected ahead of time
                 if detectedLanguage == nil {
@@ -373,5 +524,39 @@ final class TranscribeTask {
             language: detectedLanguage ?? Constants.defaultLanguageCode,
             timings: timings
         )
+    }
+
+    private func storeActiveDecoderProgressContinuation(
+        _ continuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
+    ) {
+        decoderProgressContinuationLock.lock()
+        activeDecoderProgressContinuation = continuation
+        decoderProgressContinuationLock.unlock()
+    }
+
+    private func finishActiveDecoderProgressContinuation(error: Error? = nil) {
+        decoderProgressContinuationLock.lock()
+        let continuation = activeDecoderProgressContinuation
+        activeDecoderProgressContinuation = nil
+        decoderProgressContinuationLock.unlock()
+
+        finishDecoderProgressContinuation(continuation, error: error)
+    }
+
+    private func finishActiveDecoderProgressContinuation() {
+        finishActiveDecoderProgressContinuation(error: nil)
+    }
+
+    private func finishDecoderProgressContinuation(
+        _ continuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?,
+        error: Error? = nil
+    ) {
+        guard let continuation else { return }
+
+        if let error {
+            continuation.finish(throwing: error)
+        } else {
+            continuation.finish()
+        }
     }
 }
