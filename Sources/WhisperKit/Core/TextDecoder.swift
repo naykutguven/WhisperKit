@@ -226,12 +226,12 @@ public extension TextDecoding {
         }
 
         do {
-                for try await progress in stream {
-                    if let shouldContinue = callback(progress), !shouldContinue {
-                        continuation.finish()
-                        break
-                    }
+            for try await progress in stream {
+                if let shouldContinue = callback(progress), !shouldContinue {
+                    continuation.finish()
+                    break
                 }
+            }
         } catch {
             decodingTask.cancel()
             throw error
@@ -802,46 +802,6 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
             detectedLanguage = Constants.defaultLanguageCode
             Logging.error("Detected language \(sampledLanguage) is not supported, defaulting to \(Constants.defaultLanguageCode)")
         }
-        return DecodingResult(
-            language: detectedLanguage,
-            languageProbs: languageProbs,
-            tokens: [],
-            tokenLogProbs: [],
-            text: "",
-            avgLogProb: 0.0,
-            noSpeechProb: 0.0,
-            temperature: 0.0,
-            compressionRatio: 0.0,
-            cache: nil,
-            timings: timings,
-            fallback: nil
-        )
-    }
-
-    public func decodeText(
-        from encoderOutput: any AudioEncoderOutputType,
-        using decoderInputs: any DecodingInputsType,
-        sampler tokenSampler: TokenSampling,
-        options: DecodingOptions,
-        progressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation? = nil
-    ) async throws -> DecodingResult {
-        var thrownError: Error?
-        defer {
-            if let progressContinuation {
-                if let error = thrownError {
-                    progressContinuation.finish(throwing: error)
-                } else {
-                    progressContinuation.finish()
-                }
-            }
-        }
-
-        do {
-            guard let tokenizer else {
-                // Tokenizer required for decoding
-                throw WhisperError.tokenizerUnavailable()
-            }
-
         return DecodingResult(
             language: detectedLanguage,
             languageProbs: languageProbs,
