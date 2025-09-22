@@ -91,17 +91,17 @@ public protocol TextDecoding {
         using decoderInputs: any DecodingInputsType,
         sampler tokenSampler: TokenSampling,
         options decoderOptions: DecodingOptions,
-        callback: ((TranscriptionProgress) -> Bool?)?
+        progressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
     ) async throws -> DecodingResult
 
-    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:callback:) async throws -> DecodingResult` instead.")
+    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:progressContinuation:) async throws -> DecodingResult` instead.")
     @_disfavoredOverload
     func decodeText(
         from encoderOutput: MLMultiArray,
         using decoderInputs: DecodingInputs,
         sampler tokenSampler: TokenSampling,
         options decoderOptions: DecodingOptions,
-        callback: ((TranscriptionProgress) -> Bool?)?
+        progressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
     ) async throws -> [DecodingResult]
 
     func detectLanguage(
@@ -133,7 +133,26 @@ public protocol TextDecoding {
 
 @available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
 public extension TextDecoding {
-    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:callback:) async throws -> DecodingResult` instead.")
+    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:progressContinuation:) async throws -> DecodingResult` instead.")
+    func decodeText(
+        from encoderOutput: MLMultiArray,
+        using decoderInputs: DecodingInputs,
+        sampler tokenSampler: TokenSampling,
+        options decoderOptions: DecodingOptions,
+        progressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
+    ) async throws -> [DecodingResult] {
+        let result: DecodingResult = try await decodeText(
+            from: encoderOutput,
+            using: decoderInputs,
+            sampler: tokenSampler,
+            options: decoderOptions,
+            progressContinuation: progressContinuation
+        )
+        return [result]
+    }
+
+    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:progressContinuation:) async throws -> DecodingResult` instead.")
+    @_disfavoredOverload
     func decodeText(
         from encoderOutput: MLMultiArray,
         using decoderInputs: DecodingInputs,
@@ -157,19 +176,89 @@ public extension TextDecoding {
         using decoderInputs: any DecodingInputsType,
         sampler tokenSampler: TokenSampling,
         options decoderOptions: DecodingOptions,
-        callback: ((TranscriptionProgress) -> Bool?)?
+        progressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
     ) async throws -> DecodingResult {
         let result: DecodingResult = try await decodeText(
             from: encoderOutput,
             using: decoderInputs,
             sampler: tokenSampler,
             options: decoderOptions,
-            callback: callback
+            progressContinuation: progressContinuation
         )
         return result
     }
 
-    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:callback:) async throws -> DecodingResult` instead.")
+    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:progressContinuation:) async throws -> DecodingResult` instead.")
+    func decodeText(
+        from encoderOutput: any AudioEncoderOutputType,
+        using decoderInputs: any DecodingInputsType,
+        sampler tokenSampler: TokenSampling,
+        options decoderOptions: DecodingOptions,
+        callback: ((TranscriptionProgress) -> Bool?)?
+    ) async throws -> DecodingResult {
+        guard let callback else {
+            return try await decodeText(
+                from: encoderOutput,
+                using: decoderInputs,
+                sampler: tokenSampler,
+                options: decoderOptions,
+                progressContinuation: nil
+            )
+        }
+
+        var continuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
+        let stream = AsyncThrowingStream<TranscriptionProgress, Error> { cont in
+            continuation = cont
+        }
+
+        guard let continuation else {
+            fatalError("Failed to create progress continuation")
+        }
+
+        let decodingTask = Task {
+            try await decodeText(
+                from: encoderOutput,
+                using: decoderInputs,
+                sampler: tokenSampler,
+                options: decoderOptions,
+                progressContinuation: continuation
+            )
+        }
+
+        do {
+                for try await progress in stream {
+                    if let shouldContinue = callback(progress), !shouldContinue {
+                        continuation.finish()
+                        break
+                    }
+                }
+        } catch {
+            decodingTask.cancel()
+            throw error
+        }
+
+        return try await decodingTask.value
+    }
+
+    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:progressContinuation:) async throws -> DecodingResult` instead.")
+    func decodeText(
+        from encoderOutput: any AudioEncoderOutputType,
+        using decoderInputs: DecodingInputs,
+        sampler tokenSampler: TokenSampling,
+        options decoderOptions: DecodingOptions,
+        progressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation?
+    ) async throws -> DecodingResult {
+        let result: DecodingResult = try await decodeText(
+            from: encoderOutput,
+            using: decoderInputs,
+            sampler: tokenSampler,
+            options: decoderOptions,
+            progressContinuation: progressContinuation
+        )
+        return result
+    }
+
+    @available(*, deprecated, message: "Subject to removal in a future version. Use `decodeText(from:using:sampler:options:progressContinuation:) async throws -> DecodingResult` instead.")
     func decodeText(
         from encoderOutput: any AudioEncoderOutputType,
         using decoderInputs: DecodingInputs,
@@ -177,14 +266,13 @@ public extension TextDecoding {
         options decoderOptions: DecodingOptions,
         callback: ((TranscriptionProgress) -> Bool?)?
     ) async throws -> DecodingResult {
-        let result: DecodingResult = try await decodeText(
+        try await decodeText(
             from: encoderOutput,
-            using: decoderInputs,
+            using: decoderInputs as any DecodingInputsType,
             sampler: tokenSampler,
             options: decoderOptions,
             callback: callback
         )
-        return result
     }
 
     @available(*, deprecated, message: "Subject to removal in a future version. Use `detectLanguage(from:using:sampler:options:temperature:) async throws -> DecodingResult` instead.")
@@ -735,316 +823,374 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
         using decoderInputs: any DecodingInputsType,
         sampler tokenSampler: TokenSampling,
         options: DecodingOptions,
-        callback: TranscriptionCallback = nil
+        progressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation? = nil
     ) async throws -> DecodingResult {
-        guard let tokenizer else {
-            // Tokenizer required for decoding
-            throw WhisperError.tokenizerUnavailable()
+        var thrownError: Error?
+        defer {
+            if let progressContinuation {
+                if let error = thrownError {
+                    progressContinuation.finish(throwing: error)
+                } else {
+                    progressContinuation.finish()
+                }
+            }
         }
 
-        // Single loop variables
-        var timings = TranscriptionTimings()
-        let prefilledIndex = decoderInputs.cacheLength[0].intValue
-        let initialPromptIndex = decoderInputs.initialPrompt.count
-        var currentTokens: [Int] = decoderInputs.initialPrompt
-        var nextToken: Int = decoderInputs.initialPrompt.last!
-        var logProbs: [Float] = Array(repeating: 0, count: currentTokens.count)
+        do {
+            guard let tokenizer else {
+                // Tokenizer required for decoding
+                throw WhisperError.tokenizerUnavailable()
+            }
 
-        // Logits filters
-        let logitsFilters = createLogitsFilters(options: options, prefilledIndex: prefilledIndex, initialPromptIndex: initialPromptIndex, tokenizer: tokenizer)
+        return DecodingResult(
+            language: detectedLanguage,
+            languageProbs: languageProbs,
+            tokens: [],
+            tokenLogProbs: [],
+            text: "",
+            avgLogProb: 0.0,
+            noSpeechProb: 0.0,
+            temperature: 0.0,
+            compressionRatio: 0.0,
+            cache: nil,
+            timings: timings,
+            fallback: nil
+        )
+    }
 
-        // MARK: Main loop
-
-        let loopCount = min(options.sampleLength, Constants.maxTokenContext - 1)
-        Logging.debug("Running main loop for a maximum of \(loopCount) iterations, starting at index \(prefilledIndex)")
-        var hasAlignment = false
-        var isFirstTokenLogProbTooLow = false
-        let windowUUID = UUID()
-        await earlyStopActor.set(false, for: windowUUID)
-
-        for tokenIndex in prefilledIndex..<loopCount {
-            let loopStart = Date()
-
-            let isPrefill = tokenIndex < initialPromptIndex - 1 // Prefill stops at the last token of the initial prompt
-            let isLastPrefillToken = tokenIndex == initialPromptIndex - 1
-            let isFirstToken = tokenIndex == prefilledIndex
-
-            // Check if current index is part of the initial prompt
-            if tokenIndex < initialPromptIndex {
-                let isTimestampToken = currentTokens[tokenIndex] >= tokenizer.specialTokens.timeTokenBegin
-                let modelPredictedTimestamp = nextToken >= tokenizer.specialTokens.timeTokenBegin
-
-                // Force the token unless it's the last prefill token and both are timestamps
-                if !(isLastPrefillToken && isTimestampToken && modelPredictedTimestamp) {
-                    nextToken = currentTokens[tokenIndex]
-                    Logging.debug("Forcing prompt tokenIndex: \(tokenIndex), token: \(nextToken), text: \(tokenizer.decode(tokens: [nextToken]))")
+    public func decodeText(
+        from encoderOutput: any AudioEncoderOutputType,
+        using decoderInputs: any DecodingInputsType,
+        sampler tokenSampler: TokenSampling,
+        options: DecodingOptions,
+        progressContinuation: AsyncThrowingStream<TranscriptionProgress, Error>.Continuation? = nil
+    ) async throws -> DecodingResult {
+        var thrownError: Error?
+        defer {
+            if let progressContinuation {
+                if let error = thrownError {
+                    progressContinuation.finish(throwing: error)
                 } else {
-                    // Last prefill was a timestamp but the model predicted a timestamp
-                    currentTokens[tokenIndex] = nextToken
-                    Logging.debug("Skipping prompt tokenIndex: \(tokenIndex), token: \(nextToken), text: \(tokenizer.decode(tokens: [nextToken]))")
+                    progressContinuation.finish()
                 }
             }
+        }
 
-            guard let decoderInputs = decoderInputs as? DecodingInputs else {
-                throw WhisperError.prepareDecoderInputsFailed("DecodingInputsType must be DecodingInputs")
+        do {
+            guard let tokenizer else {
+                // Tokenizer required for decoding
+                throw WhisperError.tokenizerUnavailable()
             }
 
-            // Set the current token as model input
-            decoderInputs.inputIds[0] = NSNumber(value: nextToken)
-            decoderInputs.cacheLength[0] = NSNumber(value: tokenIndex)
+            // Single loop variables
+            var timings = TranscriptionTimings()
+            let prefilledIndex = decoderInputs.cacheLength[0].intValue
+            let initialPromptIndex = decoderInputs.initialPrompt.count
+            var currentTokens: [Int] = decoderInputs.initialPrompt
+            var nextToken: Int = decoderInputs.initialPrompt.last!
+            var logProbs: [Float] = Array(repeating: 0, count: currentTokens.count)
 
-            if tokenIndex <= prefilledIndex + 3 {
-                debugCaches(decoderInputs: decoderInputs, tokenIndex: tokenIndex, prefillSize: prefilledIndex)
-            }
+            // Logits filters
+            let logitsFilters = createLogitsFilters(options: options, prefilledIndex: prefilledIndex, initialPromptIndex: initialPromptIndex, tokenizer: tokenizer)
 
-            // MARK: Decoding Inference
+            // MARK: Main loop
 
-            // Predict next token
-            let inferenceTime = Date()
+            let loopCount = min(options.sampleLength, Constants.maxTokenContext - 1)
+            Logging.debug("Running main loop for a maximum of \(loopCount) iterations, starting at index \(prefilledIndex)")
+            var hasAlignment = false
+            var isFirstTokenLogProbTooLow = false
+            let windowUUID = UUID()
+            await earlyStopActor.set(false, for: windowUUID)
+            var shouldTerminateDueToContinuation = false
 
-            guard let encoderOutput = encoderOutput as? MLMultiArray else {
-                throw WhisperError.prepareDecoderInputsFailed("Input must be MLMultiArray")
-            }
-            let predictedLogits = try await self.predictLogits(
-                TextDecoderMLMultiArrayInputType(
-                    inputIds: decoderInputs.inputIds,
-                    cacheLength: decoderInputs.cacheLength,
-                    keyCache: decoderInputs.keyCache,
-                    valueCache: decoderInputs.valueCache,
-                    kvCacheUpdateMask: decoderInputs.kvCacheUpdateMask,
-                    encoderOutputEmbeds: encoderOutput,
-                    decoderKeyPaddingMask: decoderInputs.decoderKeyPaddingMask
-                )
-            ) as? TextDecoderMLMultiArrayOutputType
+            for tokenIndex in prefilledIndex..<loopCount {
+                let loopStart = Date()
 
-            guard let decoderOutput = predictedLogits else {
-                throw WhisperError.decodingLogitsFailed("Unable to decode logits")
-            }
+                let isPrefill = tokenIndex < initialPromptIndex - 1 // Prefill stops at the last token of the initial prompt
+                let isLastPrefillToken = tokenIndex == initialPromptIndex - 1
+                let isFirstToken = tokenIndex == prefilledIndex
 
-            let decodingInferenceTime = Date().timeIntervalSince(inferenceTime)
-            timings.decodingPredictions += decodingInferenceTime
+                // Check if current index is part of the initial prompt
+                if tokenIndex < initialPromptIndex {
+                    let isTimestampToken = currentTokens[tokenIndex] >= tokenizer.specialTokens.timeTokenBegin
+                    let modelPredictedTimestamp = nextToken >= tokenizer.specialTokens.timeTokenBegin
 
-            // MARK: Non-inference
-
-            let nonInferenceStartTime = Date()
-
-            // Update predicted token as current
-            var logits = decoderOutput.logits!
-            for filter in logitsFilters {
-                logits = filter.filterLogits(logits, withTokens: currentTokens)
-            }
-
-            let filteringTime = Date().timeIntervalSince(nonInferenceStartTime)
-            timings.decodingFiltering += filteringTime
-
-            // MARK: Sampling
-
-            let samplingStartTime = Date()
-
-            let sampleResult = tokenSampler.update(tokens: currentTokens, logits: logits, logProbs: logProbs)
-
-            nextToken = sampleResult.tokens.last!
-            let nextTokenLogProb = sampleResult.logProbs.last!
-
-            Logging.debug("Predicted next tokenIndex: \(tokenIndex + 1), token: \(nextToken), text: \(tokenizer.decode(tokens: [nextToken]))")
-
-            let samplingTime = Date().timeIntervalSince(samplingStartTime)
-            timings.decodingSampling += samplingTime
-
-            isFirstTokenLogProbTooLow =
-                if isFirstToken, let firstTokenLogProbThreshold = options.firstTokenLogProbThreshold, nextTokenLogProb < firstTokenLogProbThreshold {
-                    true
-                } else {
-                    false
-                }
-            let isSegmentCompleted =
-                sampleResult.completed ||
-                currentTokens.count >= Constants.maxTokenContext - 1 ||
-                isFirstTokenLogProbTooLow
-
-            if isSegmentCompleted {
-                // Completed segment, stop the loop
-                timings.decodingNonPrediction += Date().timeIntervalSince(nonInferenceStartTime)
-                timings.decodingLoop += Date().timeIntervalSince(loopStart)
-                timings.totalDecodingLoops += 1
-                break
-            } else {
-                // MARK: KV Caching
-
-                if !isPrefill {
-                    // Found the next token, store it
-                    currentTokens.append(nextToken)
-                    logProbs.append(nextTokenLogProb)
+                    // Force the token unless it's the last prefill token and both are timestamps
+                    if !(isLastPrefillToken && isTimestampToken && modelPredictedTimestamp) {
+                        nextToken = currentTokens[tokenIndex]
+                        Logging.debug("Forcing prompt tokenIndex: \(tokenIndex), token: \(nextToken), text: \(tokenizer.decode(tokens: [nextToken]))")
+                    } else {
+                        // Last prefill was a timestamp but the model predicted a timestamp
+                        currentTokens[tokenIndex] = nextToken
+                        Logging.debug("Skipping prompt tokenIndex: \(tokenIndex), token: \(nextToken), text: \(tokenizer.decode(tokens: [nextToken]))")
+                    }
                 }
 
-                // Update KV cache for this token
-                guard let decoderCache = decoderOutput.cache,
-                      let newKeyCache = decoderCache.keyCache,
-                      let newValueCache = decoderCache.valueCache
-                else {
-                    fatalError("Invalid model output")
+                guard let decoderInputs = decoderInputs as? DecodingInputs else {
+                    throw WhisperError.prepareDecoderInputsFailed("DecodingInputsType must be DecodingInputs")
                 }
 
-                // tensor: [1, kvCacheEmbedDim, 1, kvCacheMaxSequenceLength], slice: [1, kvCacheEmbedDim, 1, 1]
-                let kvStartTime = Date()
-                TextDecoder.updateKVCache(keyTensor: decoderInputs.keyCache,
-                                          keySlice: newKeyCache,
-                                          valueTensor: decoderInputs.valueCache,
-                                          valueSlice: newValueCache,
-                                          insertAtIndex: tokenIndex)
+                // Set the current token as model input
+                decoderInputs.inputIds[0] = NSNumber(value: nextToken)
+                decoderInputs.cacheLength[0] = NSNumber(value: tokenIndex)
 
-                decoderInputs.decoderKeyPaddingMask[tokenIndex + 1] = 0
+                if tokenIndex <= prefilledIndex + 3 {
+                    debugCaches(decoderInputs: decoderInputs, tokenIndex: tokenIndex, prefillSize: prefilledIndex)
+                }
 
-                decoderInputs.kvCacheUpdateMask[tokenIndex] = 0
-                decoderInputs.kvCacheUpdateMask[tokenIndex + 1] = 1
+                // MARK: Decoding Inference
 
-                // Update alignment weights for token if present
-                if let newAlignmentWeights = decoderOutput.cache?.alignmentWeights {
-                    hasAlignment = true
-                    TextDecoder.updateAlignmentWeights(
-                        alignmentTensor: decoderInputs.alignmentWeights,
-                        alignmentSlice: newAlignmentWeights,
-                        insertAtIndex: tokenIndex
+                // Predict next token
+                let inferenceTime = Date()
+
+                guard let encoderOutput = encoderOutput as? MLMultiArray else {
+                    throw WhisperError.prepareDecoderInputsFailed("Input must be MLMultiArray")
+                }
+                let predictedLogits = try await self.predictLogits(
+                    TextDecoderMLMultiArrayInputType(
+                        inputIds: decoderInputs.inputIds,
+                        cacheLength: decoderInputs.cacheLength,
+                        keyCache: decoderInputs.keyCache,
+                        valueCache: decoderInputs.valueCache,
+                        kvCacheUpdateMask: decoderInputs.kvCacheUpdateMask,
+                        encoderOutputEmbeds: encoderOutput,
+                        decoderKeyPaddingMask: decoderInputs.decoderKeyPaddingMask
                     )
+                ) as? TextDecoderMLMultiArrayOutputType
+
+                guard let decoderOutput = predictedLogits else {
+                    throw WhisperError.decodingLogitsFailed("Unable to decode logits")
                 }
 
-                let kvTime = Date().timeIntervalSince(kvStartTime)
-                timings.decodingKvCaching += kvTime
-                timings.totalKVUpdateRuns += 1
+                let decodingInferenceTime = Date().timeIntervalSince(inferenceTime)
+                timings.decodingPredictions += decodingInferenceTime
 
-                // Prepare results
-                let wordTokens = currentTokens.filter { $0 < tokenizer.specialTokens.specialTokenBegin }
-                let slicedTextTokens = options.skipSpecialTokens ? wordTokens : currentTokens
-                let currentTranscript = tokenizer.decode(tokens: slicedTextTokens)
-                let averageLogProb = logProbs.reduce(0, +) / Float(logProbs.count)
-                let compressionRatio = TextUtilities.compressionRatio(of: currentTokens)
+                // MARK: Non-inference
 
-                let result = TranscriptionProgress(timings: timings, text: currentTranscript, tokens: currentTokens, avgLogprob: averageLogProb, compressionRatio: compressionRatio)
+                let nonInferenceStartTime = Date()
 
-                // Call the callback if it is provided on a background thread
-                if let callback = callback {
-                    Task.detached(priority: .low) { [weak self] in
-                        guard let self = self else { return }
-                        let shouldContinue = callback(result)
-                        if let shouldContinue = shouldContinue, !shouldContinue, !isPrefill {
-                            Logging.debug("Early stopping")
-                            await self.earlyStopActor.set(true, for: windowUUID)
+                // Update predicted token as current
+                var logits = decoderOutput.logits!
+                for filter in logitsFilters {
+                    logits = filter.filterLogits(logits, withTokens: currentTokens)
+                }
+
+                let filteringTime = Date().timeIntervalSince(nonInferenceStartTime)
+                timings.decodingFiltering += filteringTime
+
+                // MARK: Sampling
+
+                let samplingStartTime = Date()
+
+                let sampleResult = tokenSampler.update(tokens: currentTokens, logits: logits, logProbs: logProbs)
+
+                nextToken = sampleResult.tokens.last!
+                let nextTokenLogProb = sampleResult.logProbs.last!
+
+                Logging.debug("Predicted next tokenIndex: \(tokenIndex + 1), token: \(nextToken), text: \(tokenizer.decode(tokens: [nextToken]))")
+
+                let samplingTime = Date().timeIntervalSince(samplingStartTime)
+                timings.decodingSampling += samplingTime
+
+                isFirstTokenLogProbTooLow =
+                    if isFirstToken, let firstTokenLogProbThreshold = options.firstTokenLogProbThreshold, nextTokenLogProb < firstTokenLogProbThreshold {
+                        true
+                    } else {
+                        false
+                    }
+                let isSegmentCompleted =
+                    sampleResult.completed ||
+                    currentTokens.count >= Constants.maxTokenContext - 1 ||
+                    isFirstTokenLogProbTooLow
+
+                if isSegmentCompleted {
+                    // Completed segment, stop the loop
+                    timings.decodingNonPrediction += Date().timeIntervalSince(nonInferenceStartTime)
+                    timings.decodingLoop += Date().timeIntervalSince(loopStart)
+                    timings.totalDecodingLoops += 1
+                    break
+                } else {
+                    // MARK: KV Caching
+
+                    if !isPrefill {
+                        // Found the next token, store it
+                        currentTokens.append(nextToken)
+                        logProbs.append(nextTokenLogProb)
+                    }
+
+                    // Update KV cache for this token
+                    guard let decoderCache = decoderOutput.cache,
+                          let newKeyCache = decoderCache.keyCache,
+                          let newValueCache = decoderCache.valueCache
+                    else {
+                        fatalError("Invalid model output")
+                    }
+
+                    // tensor: [1, kvCacheEmbedDim, 1, kvCacheMaxSequenceLength], slice: [1, kvCacheEmbedDim, 1, 1]
+                    let kvStartTime = Date()
+                    TextDecoder.updateKVCache(keyTensor: decoderInputs.keyCache,
+                                              keySlice: newKeyCache,
+                                              valueTensor: decoderInputs.valueCache,
+                                              valueSlice: newValueCache,
+                                              insertAtIndex: tokenIndex)
+
+                    decoderInputs.decoderKeyPaddingMask[tokenIndex + 1] = 0
+
+                    decoderInputs.kvCacheUpdateMask[tokenIndex] = 0
+                    decoderInputs.kvCacheUpdateMask[tokenIndex + 1] = 1
+
+                    // Update alignment weights for token if present
+                    if let newAlignmentWeights = decoderOutput.cache?.alignmentWeights {
+                        hasAlignment = true
+                        TextDecoder.updateAlignmentWeights(
+                            alignmentTensor: decoderInputs.alignmentWeights,
+                            alignmentSlice: newAlignmentWeights,
+                            insertAtIndex: tokenIndex
+                        )
+                    }
+
+                    let kvTime = Date().timeIntervalSince(kvStartTime)
+                    timings.decodingKvCaching += kvTime
+                    timings.totalKVUpdateRuns += 1
+
+                    // Prepare results
+                    let wordTokens = currentTokens.filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+                    let slicedTextTokens = options.skipSpecialTokens ? wordTokens : currentTokens
+                    let currentTranscript = tokenizer.decode(tokens: slicedTextTokens)
+                    let averageLogProb = logProbs.reduce(0, +) / Float(logProbs.count)
+                    let compressionRatio = TextUtilities.compressionRatio(of: currentTokens)
+
+                    let result = TranscriptionProgress(timings: timings, text: currentTranscript, tokens: currentTokens, avgLogprob: averageLogProb, compressionRatio: compressionRatio)
+
+                    if let progressContinuation {
+                        let yieldResult = await progressContinuation.yield(result)
+                        if case .terminated = yieldResult, !isPrefill {
+                            Logging.debug("Progress continuation terminated; stopping decode loop")
+                            await earlyStopActor.set(true, for: windowUUID)
+                            shouldTerminateDueToContinuation = true
                         }
                     }
                 }
+
+                timings.decodingNonPrediction += Date().timeIntervalSince(nonInferenceStartTime)
+                timings.decodingLoop += Date().timeIntervalSince(loopStart)
+                timings.totalDecodingLoops += 1
+
+                if shouldTerminateDueToContinuation {
+                    break
+                }
+
+                if tokenIndex == prefilledIndex {
+                    Logging.debug("Found first token at: \(Date())")
+                    timings.firstTokenTime = CFAbsoluteTimeGetCurrent()
+                }
+
+                // Check if early stopping is triggered
+                if await earlyStopActor.get(for: windowUUID) {
+                    break
+                }
             }
 
-            timings.decodingNonPrediction += Date().timeIntervalSince(nonInferenceStartTime)
-            timings.decodingLoop += Date().timeIntervalSince(loopStart)
-            timings.totalDecodingLoops += 1
-
-            if tokenIndex == prefilledIndex {
-                Logging.debug("Found first token at: \(Date())")
-                timings.firstTokenTime = CFAbsoluteTimeGetCurrent()
+            // Cleanup after loop completion
+            if await earlyStopActor.remove(for: windowUUID) == nil {
+                Logging.error("Early stop flag not found for window: \(windowUUID)")
             }
 
-            // Check if early stopping is triggered
-            if await earlyStopActor.get(for: windowUUID) {
-                break
+            var cache: DecodingCache?
+            if let inputs = decoderInputs as? DecodingInputs {
+                cache = DecodingCache(
+                    keyCache: inputs.keyCache,
+                    valueCache: inputs.valueCache,
+                    alignmentWeights: hasAlignment ? inputs.alignmentWeights : nil
+                )
             }
-        }
 
-        // Cleanup after loop completion
-        if await earlyStopActor.remove(for: windowUUID) == nil {
-            Logging.error("Early stop flag not found for window: \(windowUUID)")
-        }
+            // NOTE:
+            // While `currentTokens` and `logProbs` are usually the same length
+            // `currentTokens` does not always contain an end of text token at the end (it is added by this finalize function),
+            let finalSamplingResult = tokenSampler.finalize(tokens: currentTokens, logProbs: logProbs)
+            let segmentTokens = finalSamplingResult.tokens
+            let segmentLogProbs = finalSamplingResult.logProbs
 
-        var cache: DecodingCache?
-        if let inputs = decoderInputs as? DecodingInputs {
-            cache = DecodingCache(
-                keyCache: inputs.keyCache,
-                valueCache: inputs.valueCache,
-                alignmentWeights: hasAlignment ? inputs.alignmentWeights : nil
-            )
-        }
+            let startIndex = segmentTokens.firstIndex(of: tokenizer.specialTokens.startOfTranscriptToken) ?? 0
+            let endIndex = segmentTokens.firstIndex(of: tokenizer.specialTokens.endToken) ?? segmentTokens.count
+            let filteredTokens = Array(segmentTokens[startIndex...endIndex])
+            let filteredLogProbs = Array(segmentLogProbs[startIndex...endIndex])
 
-        // NOTE:
-        // While `currentTokens` and `logProbs` are usually the same length
-        // `currentTokens` does not always contain an end of text token at the end (it is added by this finalize function),
-        let finalSamplingResult = tokenSampler.finalize(tokens: currentTokens, logProbs: logProbs)
-        let segmentTokens = finalSamplingResult.tokens
-        let segmentLogProbs = finalSamplingResult.logProbs
+            let sumLogProbs = filteredLogProbs.reduce(0, +)
+            let avgLogProbs = sumLogProbs / Float(filteredLogProbs.count)
 
-        let startIndex = segmentTokens.firstIndex(of: tokenizer.specialTokens.startOfTranscriptToken) ?? 0
-        let endIndex = segmentTokens.firstIndex(of: tokenizer.specialTokens.endToken) ?? segmentTokens.count
-        let filteredTokens = Array(segmentTokens[startIndex...endIndex])
-        let filteredLogProbs = Array(segmentLogProbs[startIndex...endIndex])
+            var tokenProbs = [[Int: Float]]()
+            for (index, token) in filteredTokens.enumerated() {
+                tokenProbs.append([token: filteredLogProbs[index]])
+            }
 
-        let sumLogProbs = filteredLogProbs.reduce(0, +)
-        let avgLogProbs = sumLogProbs / Float(filteredLogProbs.count)
+            let wordTokens = filteredTokens.filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+            let finalCompressionRatio = TextUtilities.compressionRatio(of: wordTokens)
 
-        var tokenProbs = [[Int: Float]]()
-        for (index, token) in filteredTokens.enumerated() {
-            tokenProbs.append([token: filteredLogProbs[index]])
-        }
+            var temperature = options.temperature
+            if let sampler = tokenSampler as? GreedyTokenSampler {
+                // Convert Float16 temperature to Float with 3 decimal places
+                temperature = Float(sampler.temperature).rounded(3)
+            }
 
-        let wordTokens = filteredTokens.filter { $0 < tokenizer.specialTokens.specialTokenBegin }
-        let finalCompressionRatio = TextUtilities.compressionRatio(of: wordTokens)
+            let noSpeechProb: Float = 0 // TODO: implement no speech prob
 
-        var temperature = options.temperature
-        if let sampler = tokenSampler as? GreedyTokenSampler {
-            // Convert Float16 temperature to Float with 3 decimal places
-            temperature = Float(sampler.temperature).rounded(3)
-        }
+            // If language is still nil here, check language can be inferred from tokens
+            var language = options.language ?? Constants.defaultLanguageCode
+            var languageProbs = [String: Float]()
+            if options.language == nil {
+                // Find the first token that is a recognized language token
+                if let predictedLanguageIndex = filteredTokens.firstIndex(where: { tokenizer.allLanguageTokens.contains($0) }),
+                   predictedLanguageIndex < tokenProbs.count
+                {
+                    let predictedLanguageToken = filteredTokens[predictedLanguageIndex]
+                    // Decode the predicted language token to get the language
+                    language = tokenizer.decode(tokens: [predictedLanguageToken]).trimmingSpecialTokenCharacters()
 
-        let noSpeechProb: Float = 0 // TODO: implement no speech prob
-
-        // If language is still nil here, check language can be inferred from tokens
-        var language = options.language ?? Constants.defaultLanguageCode
-        var languageProbs = [String: Float]()
-        if options.language == nil {
-            // Find the first token that is a recognized language token
-            if let predictedLanguageIndex = filteredTokens.firstIndex(where: { tokenizer.allLanguageTokens.contains($0) }),
-               predictedLanguageIndex < tokenProbs.count
-            {
-                let predictedLanguageToken = filteredTokens[predictedLanguageIndex]
-                // Decode the predicted language token to get the language
-                language = tokenizer.decode(tokens: [predictedLanguageToken]).trimmingSpecialTokenCharacters()
-
-                // Fetch the corresponding probability for the predicted language
-                let probsDict = tokenProbs[predictedLanguageIndex]
-                languageProbs[language] = probsDict[predictedLanguageToken] ?? 0.0
+                    // Fetch the corresponding probability for the predicted language
+                    let probsDict = tokenProbs[predictedLanguageIndex]
+                    languageProbs[language] = probsDict[predictedLanguageToken] ?? 0.0
+                } else {
+                    // Set default values if no language token is found
+                    languageProbs[language] = 0.0
+                }
             } else {
-                // Set default values if no language token is found
+                // If language is provided, set the logprob to 0.0
                 languageProbs[language] = 0.0
             }
-        } else {
-            // If language is provided, set the logprob to 0.0
-            languageProbs[language] = 0.0
+
+            let transcript = tokenizer.decode(tokens: filteredTokens)
+
+            Logging.debug("Completed window: \(transcript)")
+
+            let decodingFallback = DecodingFallback(
+                options: options,
+                isFirstTokenLogProbTooLow: isFirstTokenLogProbTooLow,
+                noSpeechProb: noSpeechProb,
+                compressionRatio: finalCompressionRatio,
+                avgLogProb: avgLogProbs
+            )
+
+            let decodingResult = DecodingResult(
+                language: language,
+                languageProbs: languageProbs,
+                tokens: filteredTokens,
+                tokenLogProbs: tokenProbs,
+                text: transcript,
+                avgLogProb: avgLogProbs,
+                noSpeechProb: noSpeechProb,
+                temperature: temperature,
+                compressionRatio: finalCompressionRatio,
+                cache: cache,
+                timings: timings,
+                fallback: decodingFallback
+            )
+            return decodingResult
+        } catch {
+            thrownError = error
+            throw error
         }
-
-        let transcript = tokenizer.decode(tokens: filteredTokens)
-
-        Logging.debug("Completed window: \(transcript)")
-
-        let decodingFallback = DecodingFallback(
-            options: options,
-            isFirstTokenLogProbTooLow: isFirstTokenLogProbTooLow,
-            noSpeechProb: noSpeechProb,
-            compressionRatio: finalCompressionRatio,
-            avgLogProb: avgLogProbs
-        )
-
-        let decodingResult = DecodingResult(
-            language: language,
-            languageProbs: languageProbs,
-            tokens: filteredTokens,
-            tokenLogProbs: tokenProbs,
-            text: transcript,
-            avgLogProb: avgLogProbs,
-            noSpeechProb: noSpeechProb,
-            temperature: temperature,
-            compressionRatio: finalCompressionRatio,
-            cache: cache,
-            timings: timings,
-            fallback: decodingFallback
-        )
-        return decodingResult
     }
     
     internal func createLogitsFilters(
