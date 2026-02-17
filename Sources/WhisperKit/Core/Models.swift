@@ -531,17 +531,23 @@ public struct DecodingResult {
     }
 }
 
-/// Reference-type container for transcription output.
-/// The stored properties stay thread-safe because each one uses
-/// `TranscriptionPropertyLock`, so reads/writes hop through a private `NSLock`
-/// before the value is accessed, making this shared `@unchecked Sendable` class
-/// safe to hand across concurrent contexts.
-open class TranscriptionResult: Codable, @unchecked Sendable {
-    @TranscriptionPropertyLock public var text: String
-    @TranscriptionPropertyLock public var segments: [TranscriptionSegment]
-    @TranscriptionPropertyLock public var language: String
-    @TranscriptionPropertyLock public var timings: TranscriptionTimings
-    @TranscriptionPropertyLock public var seekTime: Float?
+/// Represents the full result of a transcription operation, including the transcribed text, segment breakdown,
+/// detected language, timing/speed measurements, and the seek position (if applicable).
+///
+/// This structure carries all the essential information returned after an audio transcription request completes.
+/// It is designed for serialization, transfer, and incremental updates during live transcription.
+///
+/// - SeeAlso: `TranscriptionSegment`, `TranscriptionTimings`, `WordTiming`
+public struct TranscriptionResult: Codable, Sendable {
+    public var text: String
+    public var segments: [TranscriptionSegment]
+    public var language: String
+    public var timings: TranscriptionTimings
+    public var seekTime: Float?
+
+    public var allWords: [WordTiming] {
+        return segments.compactMap { $0.words }.flatMap { $0 }
+    }
 
     public init(
         text: String,
@@ -630,36 +636,6 @@ open class TranscriptionResult: Codable, @unchecked Sendable {
         Speed Factor:                  \(String(format: "%.3f", 1.0 / rtf))
         Fallbacks:                     \(timings.totalDecodingFallbacks)
         """)
-    }
-}
-
-/// Value-type equivalent of `TranscriptionResult` without property locking.
-public struct TranscriptionResultStruct: Codable, Sendable {
-    public var text: String
-    public var segments: [TranscriptionSegment]
-    public var language: String
-    public var timings: TranscriptionTimings
-    public var seekTime: Float?
-
-    public init(
-        text: String,
-        segments: [TranscriptionSegment],
-        language: String,
-        timings: TranscriptionTimings,
-        seekTime: Float? = nil
-    ) {
-        self.text = text
-        self.segments = segments
-        self.language = language
-        self.timings = timings
-        self.seekTime = seekTime
-    }
-}
-
-
-public extension TranscriptionResult {
-    var allWords: [WordTiming] {
-        return segments.compactMap { $0.words }.flatMap { $0 }
     }
 }
 
